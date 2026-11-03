@@ -36,6 +36,8 @@
     <symbol id="i-sparkle" viewBox="0 0 24 24"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M6.3 6.3l2.5 2.5M15.2 15.2l2.5 2.5M6.3 17.7l2.5-2.5M15.2 8.8l2.5-2.5"/></symbol>
     <symbol id="i-pen" viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13.5 6.5 4 4"/></symbol>
     <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></symbol>
+    <symbol id="i-linkedin" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M8 10.5V17M8 7.5v.01M12 17v-6.5M12 13.5a2.5 2.5 0 0 1 5 0V17"/></symbol>
+    <symbol id="i-funnel" viewBox="0 0 24 24"><path d="M3 4h18l-7 8.5V19l-4 2v-8.5z"/></symbol>
     <symbol id="i-flag" viewBox="0 0 24 24"><path d="M5 21V4M5 4h11l-2 4 2 4H5"/></symbol>
   </defs>
 </svg>
@@ -72,10 +74,12 @@
       <div class="nav-label">Work</div>
       <button class="active" onclick="showTab('today', this)"><svg class="icon" aria-hidden="true"><use href="#i-today"/></svg><span class="label">Today</span><span class="nav-count" id="nav-today"></span></button>
       <button onclick="showTab('outbox', this)"><svg class="icon" aria-hidden="true"><use href="#i-outbox"/></svg><span class="label">Outbox</span><span class="nav-count" id="nav-outbox"></span></button>
+      <button onclick="showTab('linkedin', this)"><svg class="icon" aria-hidden="true"><use href="#i-linkedin"/></svg><span class="label">LinkedIn</span><span class="nav-count" id="nav-linkedin"></span></button>
       <button onclick="showTab('conversations', this)"><svg class="icon" aria-hidden="true"><use href="#i-conversations"/></svg><span class="label">Conversations</span><span class="nav-count" id="nav-conversations"></span></button>
     </div>
     <div class="nav-group">
       <div class="nav-label">Pipeline</div>
+      <button onclick="showTab('funnel', this)"><svg class="icon" aria-hidden="true"><use href="#i-funnel"/></svg><span class="label">Funnel</span></button>
       <button onclick="showTab('signals', this)"><svg class="icon" aria-hidden="true"><use href="#i-signals"/></svg><span class="label">Signals</span><span class="nav-count" id="nav-signals"></span></button>
       <button onclick="showTab('discover', this)"><svg class="icon" aria-hidden="true"><use href="#i-discover"/></svg><span class="label">Discover</span></button>
       <button onclick="showTab('companies', this)"><svg class="icon" aria-hidden="true"><use href="#i-companies"/></svg><span class="label">Companies</span></button>
@@ -144,6 +148,70 @@
       </div>
     </aside>
   </div>
+</div>
+
+<!-- LinkedIn: Harvey prepares, a person sends -->
+<div id="linkedin" class="section">
+  <div class="section-head">
+    <div>
+      <h2>LinkedIn</h2>
+      <p>Add people you find on LinkedIn. Harvey researches them and drafts the notes; you send them by hand from your own account.</p>
+    </div>
+  </div>
+
+  <div class="grid-main">
+    <div>
+      <div class="li-bar" id="li-bar"></div>
+      <div class="toolbar"><div class="segmented" id="li-filters" role="group" aria-label="Show"></div></div>
+      <div id="li-list"></div>
+    </div>
+
+    <aside>
+      <div class="subhead">Add someone</div>
+      <form class="card li-add" id="li-add" onsubmit="addLinkedInLead(event)">
+        <div class="form-group"><label class="form-label" for="li-url">LinkedIn profile</label>
+          <input class="form-input" id="li-url" placeholder="linkedin.com/in/their-name" required autocomplete="off"></div>
+        <div class="form-row">
+          <div class="form-group"><label class="form-label" for="li-first">First name</label>
+            <input class="form-input" id="li-first" required autocomplete="off"></div>
+          <div class="form-group"><label class="form-label" for="li-last">Last name</label>
+            <input class="form-input" id="li-last" required autocomplete="off"></div>
+        </div>
+        <div class="form-group"><label class="form-label" for="li-title">Job title</label>
+          <input class="form-input" id="li-title" placeholder="Managing Partner" required autocomplete="off"></div>
+        <div class="form-group"><label class="form-label" for="li-company">Company</label>
+          <input class="form-input" id="li-company" required autocomplete="off"></div>
+        <div class="form-group"><label class="form-label" for="li-site">Company website <span class="hint">so Harvey can find their email</span></label>
+          <input class="form-input" id="li-site" placeholder="example.com" autocomplete="off"></div>
+        <div class="form-group"><label class="form-label" for="li-notes">What you noticed <span class="hint">optional, used in the note</span></label>
+          <input class="form-input" id="li-notes" placeholder="Posted about GST filing season" autocomplete="off"></div>
+        <button class="btn btn-primary" type="submit">Add</button>
+      </form>
+
+      <div class="subhead">Import a CSV</div>
+      <div class="card li-import">
+        <p class="li-help">Columns: <code>linkedin_url</code>, <code>first_name</code>, <code>last_name</code> (or <code>name</code>), <code>title</code>, <code>company</code>, and optionally <code>website</code>, <code>location</code>, <code>industry</code>, <code>notes</code>.</p>
+        <input type="file" id="li-csv" accept=".csv,text/csv" class="form-input" onchange="importLinkedInCsv(this)">
+        <div id="li-import-result" class="li-help"></div>
+      </div>
+    </aside>
+  </div>
+</div>
+
+<!-- Funnel: where contacts get to, and where they stop -->
+<div id="funnel" class="section">
+  <div class="section-head">
+    <div>
+      <h2>Funnel</h2>
+      <p>How far each contact has got, from found to meeting, and why the rest stopped.</p>
+    </div>
+  </div>
+  <div class="toolbar">
+    <div class="segmented" id="funnel-days" role="group" aria-label="Contacts found in"></div>
+    <select class="form-input funnel-select" id="funnel-industry" aria-label="Category"
+            onchange="setFunnelIndustry(this.value)"></select>
+  </div>
+  <div class="card" id="funnel-chart"></div>
 </div>
 
 <!-- Signals: the confirmation gate -->

@@ -509,6 +509,56 @@ tr:focus-within .row-action { opacity: 1; }
 .segmented button .n { color: var(--text-3); font-weight: 500; }
 .segmented button.on { background: var(--surface); color: var(--text); box-shadow: var(--shadow-border); }
 @media (hover: hover) { .segmented button:not(.on):hover { color: var(--text); } }
+/* ── LinkedIn queue ─────────────────────────────────────────── */
+.li-bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2) var(--sp-4); font-size: var(--fs-ui); color: var(--text-2); margin-bottom: var(--sp-3); }
+.li-bar b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+.li-bar .btn { margin-left: auto; }
+.li-card { margin-bottom: var(--sp-3); }
+.li-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--sp-3); }
+.li-who { min-width: 0; }
+.li-who .name { font-weight: 600; font-size: var(--fs-body); }
+.li-who .role { font-size: var(--fs-ui); color: var(--text-2); overflow-wrap: anywhere; }
+.li-step { font-size: var(--fs-caption); color: var(--text-3); white-space: nowrap; }
+.li-msg { margin-top: var(--sp-3); }
+.li-msg label { display: flex; justify-content: space-between; font-size: var(--fs-caption); color: var(--text-3); margin-bottom: 4px; }
+.li-msg label .over { color: var(--bad); }
+.li-msg textarea { min-height: 64px; resize: vertical; font: var(--fs-ui)/1.5 var(--sans); }
+.li-msg .sent-text { font-size: var(--fs-ui); color: var(--text-2); white-space: pre-wrap; overflow-wrap: anywhere;
+  background: var(--surface-2); border-radius: var(--r-sm); padding: 8px 10px; }
+.li-help { font-size: var(--fs-caption); color: var(--text-3); margin-bottom: var(--sp-2); }
+.li-help code { font-family: var(--mono); font-size: 11px; }
+.li-add .btn { width: 100%; }
+.li-add .hint { font-weight: 400; color: var(--text-3); }
+.li-stopped { font-size: var(--fs-caption); color: var(--wait); margin-top: var(--sp-2); }
+
+/* ── Funnel: one series, so one hue; text stays in ink ───────── */
+.funnel-select { width: auto; min-width: 200px; max-width: 320px; }
+.funnel-facts { display: flex; flex-wrap: wrap; gap: var(--sp-2) var(--sp-5); font-size: var(--fs-ui); color: var(--text-2);
+  padding-bottom: var(--sp-4); border-bottom: 1px solid var(--line); margin-bottom: var(--sp-3); }
+.funnel-facts b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+.funnel-head, .funnel-row {
+  display: grid; grid-template-columns: minmax(96px, 150px) minmax(0, 1fr) 6ch 7ch; gap: var(--sp-3); align-items: center;
+}
+.funnel-head { font-size: var(--fs-caption); color: var(--text-3); padding: 0 6px 4px; }
+.funnel-head span:nth-child(n+3) { text-align: right; }
+.funnel-row { padding: 6px; border-radius: var(--r-sm); outline: none; }
+@media (hover: hover) { .funnel-row:hover { background: var(--surface-2); } }
+.funnel-row:focus-visible { box-shadow: 0 0 0 2px var(--accent-line); }
+.funnel-label { font-size: var(--fs-ui); color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.funnel-track { height: 16px; background: var(--surface-2); border-radius: 0 var(--r-xs) var(--r-xs) 0; overflow: hidden; }
+.funnel-fill { display: block; height: 100%; min-width: 0; background: var(--accent); border-radius: 0 var(--r-xs) var(--r-xs) 0; }
+.funnel-count { font-size: var(--fs-ui); font-weight: 600; text-align: right; font-variant-numeric: tabular-nums; }
+.funnel-count.zero { color: var(--text-3); font-weight: 400; }
+.funnel-conv { font-size: var(--fs-caption); color: var(--text-2); text-align: right; font-variant-numeric: tabular-nums; }
+.funnel-held { font-size: var(--fs-caption); color: var(--text-3); margin: 0 6px 4px calc(min(150px, 30%) + var(--sp-3) + 6px); }
+.funnel-held b { color: var(--text-2); font-weight: 500; font-variant-numeric: tabular-nums; }
+.funnel-flag { display: inline-block; font-size: 11px; font-weight: 500; color: var(--text); background: var(--surface-3);
+  border-radius: var(--r-xs); padding: 1px 6px; margin-right: 6px; }
+@media (max-width: 640px) {
+  .funnel-head, .funnel-row { grid-template-columns: 96px minmax(0, 1fr) 4ch 5ch; gap: var(--sp-2); }
+  .funnel-held { margin-left: 6px; }
+  .funnel-select { min-width: 0; max-width: none; flex: 1 1 100%; }
+}
 .table-foot { font-size: var(--fs-caption); color: var(--text-3); padding: var(--sp-3) 2px 0; }
 
 /* ── Today: the queue, the steps, the timeline ───────────────── */

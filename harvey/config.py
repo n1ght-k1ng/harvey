@@ -603,7 +603,7 @@ class UsageConfig(BaseModel):
         return v
 
 
-BRAIN_PROVIDERS = ("claude", "codex")
+BRAIN_PROVIDERS = ("claude", "codex", "openai")
 CODEX_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
 
 # Model names are passed to a CLI, so they must look like a model name and
@@ -623,6 +623,15 @@ class BrainConfig(BaseModel):
     provider: str = "claude"
     model: str = ""  # empty = the provider's own default
     reasoning_effort: str = ""  # codex only; empty = model default
+    # openai only: any OpenAI-compatible /v1/chat/completions endpoint (a
+    # self-hosted vLLM/SGLang/Ollama server or a hosted API). The key is
+    # BRAIN_API_KEY in .env. See harvey/openai_compat.py.
+    base_url: str = ""
+    max_tokens: int = 4096
+    temperature: float = 0.7
+    disable_thinking: bool = True   # ask Qwen3-style models to skip <think>
+    ca_cert: str = ""               # PEM file to trust for a self-signed server
+    tls_verify: bool = True         # false = don't check the certificate (unsafe)
 
     @field_validator("provider", mode="before")
     @classmethod
@@ -642,6 +651,56 @@ class BrainConfig(BaseModel):
         if v and not _MODEL_NAME_RE.match(v):
             raise ValueError(f"'{v}' is not a valid model name.")
         return v
+
+    @field_validator("base_url", mode="before")
+    @classmethod
+    def _valid_base_url(cls, v) -> str:
+        v = str(v or "").strip().rstrip("/")
+        if not v:
+            return v
+        from urllib.parse import urlsplit
+        parts = urlsplit(v)
+        local = parts.hostname in ("localhost", "127.0.0.1", "::1")
+        if parts.scheme not in ("https", "http") or not parts.hostname:
+            raise ValueError(f"'{v}' is not a URL (expected https://host/v1).")
+        if parts.scheme == "http" and not local:
+            # Prospect data and the API key would cross the network in clear.
+            raise ValueError("brain.base_url must use https:// unless the server is on this machine.")
+        if parts.username or parts.password or parts.query or parts.fragment:
+            raise ValueError("brain.base_url must not carry credentials, a query or a fragment; "
+                             "put the key in .env as BRAIN_API_KEY.")
+        return v
+
+    @field_validator("max_tokens")
+    @classmethod
+    def _valid_max_tokens(cls, v: int) -> int:
+        if not 256 <= v <= 131072:
+            raise ValueError("brain.max_tokens must be between 256 and 131072.")
+        return v
+
+    @field_validator("temperature")
+    @classmethod
+    def _valid_temperature(cls, v: float) -> float:
+        if not 0 <= v <= 2:
+            raise ValueError("brain.temperature must be between 0 and 2.")
+        return v
+
+    @field_validator("ca_cert", mode="before")
+    @classmethod
+    def _valid_ca_cert(cls, v) -> str:
+        v = str(v or "").strip()
+        if not v:
+            return v
+        path = Path(v) if Path(v).is_absolute() else PROJECT_ROOT / v
+        if not path.is_file():
+            raise ValueError(f"brain.ca_cert: no file at {path}.")
+        return str(path)
+
+    @model_validator(mode="after")
+    def _openai_needs_endpoint(self):
+        if self.provider == "openai" and (not self.base_url or not self.model):
+            raise ValueError("brain.provider openai needs brain.base_url and brain.model.")
+        return self
 
     @field_validator("reasoning_effort", mode="before")
     @classmethod

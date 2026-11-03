@@ -519,10 +519,32 @@ MIGRATIONS: list[str] = [
     -- knows about the recipient. Empty until then.
     ALTER TABLE prospects ADD COLUMN timezone TEXT DEFAULT '';
     """,
+    # ── v15: calls to an OpenAI-compatible endpoint (brain.provider: openai) ──
+    """
+    ALTER TABLE usage_log ADD COLUMN openai_calls INTEGER DEFAULT 0;
+    """,
+    # ── v16: the LinkedIn queue. Harvey drafts; a person sends by hand and
+    # records what happened. One row per person. ──
+    """
+    CREATE TABLE IF NOT EXISTS linkedin_tasks (
+        id TEXT PRIMARY KEY,
+        prospect_id TEXT NOT NULL UNIQUE REFERENCES prospects(id),
+        connect_note TEXT DEFAULT '',
+        followup TEXT DEFAULT '',
+        status TEXT DEFAULT 'draft',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        connect_sent_at TEXT DEFAULT '',
+        accepted_at TEXT DEFAULT '',
+        followup_sent_at TEXT DEFAULT '',
+        outcome_at TEXT DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS idx_linkedin_tasks_status ON linkedin_tasks(status);
+    """,
 ]
 
-BRAIN_PROVIDERS = ("claude", "codex")
-_USAGE_LOG_COLUMN = {"claude": "claude_calls", "codex": "codex_calls"}
+BRAIN_PROVIDERS = ("claude", "codex", "openai")
+_USAGE_LOG_COLUMN = {"claude": "claude_calls", "codex": "codex_calls", "openai": "openai_calls"}
 
 # When a company was last profiled: the newer of the explicit check stamp
 # (set on every attempt, reachable or not) and its latest profile observation
@@ -2382,6 +2404,77 @@ class StateManager:
             await db.commit()
 
     # ── Actions Log ──
+
+    # ── LinkedIn queue (harvey/linkedin_queue.py) ──
+
+    async def prospects_needing_linkedin_draft(self, limit: int = 10) -> list[Prospect]:
+        """People with a LinkedIn profile, still reachable, and no draft yet."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """SELECT p.* FROM prospects p
+                   LEFT JOIN linkedin_tasks t ON t.prospect_id = p.id
+                   WHERE t.id IS NULL AND COALESCE(p.linkedin_url, '') != ''
+                     AND p.status NOT IN ('opted_out', 'replied', 'meeting', 'closed', 'lost')
+                   ORDER BY p.score DESC, p.created_at DESC LIMIT ?""",
+                (limit,),
+            ) as cursor:
+                return [self._prospect_from_row(r) for r in await cursor.fetchall()]
+
+    async def add_linkedin_task(self, prospect_id: str, connect_note: str, followup: str) -> str:
+        task_id = _new_id()
+        now = _utcnow().isoformat()
+        async with self._connect() as db:
+            await db.execute(
+                """INSERT OR IGNORE INTO linkedin_tasks
+                   (id, prospect_id, connect_note, followup, status, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, 'draft', ?, ?)""",
+                (task_id, prospect_id, connect_note, followup, now, now),
+            )
+            await db.commit()
+        return task_id
+
+    async def get_linkedin_task(self, task_id: str) -> dict | None:
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT * FROM linkedin_tasks WHERE id = ?", (task_id,)) as cur:
+                row = await cur.fetchone()
+                return dict(row) if row else None
+
+    async def update_linkedin_task(self, task_id: str, **fields) -> bool:
+        allowed = {"connect_note", "followup", "status", "connect_sent_at",
+                   "accepted_at", "followup_sent_at", "outcome_at"}
+        sets = {k: v for k, v in fields.items() if k in allowed}
+        if not sets:
+            return False
+        sets["updated_at"] = _utcnow().isoformat()
+        cols = ", ".join(f"{k} = ?" for k in sets)
+        async with self._connect() as db:
+            cur = await db.execute(f"UPDATE linkedin_tasks SET {cols} WHERE id = ?",
+                                   (*sets.values(), task_id))
+            await db.commit()
+            return cur.rowcount > 0
+
+    async def linkedin_queue(self) -> list[dict]:
+        """Every LinkedIn task with the person it's for, newest first."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """SELECT t.*, p.first_name, p.last_name, p.title, p.company, p.linkedin_url,
+                          p.email, p.email_status, p.status AS prospect_status, p.industry,
+                          p.personalization_notes
+                   FROM linkedin_tasks t JOIN prospects p ON p.id = t.prospect_id
+                   ORDER BY t.updated_at DESC""",
+            ) as cursor:
+                return [dict(r) for r in await cursor.fetchall()]
+
+    async def count_linkedin_sent_since(self, since_iso: str) -> int:
+        async with self._connect() as db:
+            async with db.execute(
+                "SELECT COUNT(*) FROM linkedin_tasks WHERE connect_sent_at >= ? AND connect_sent_at != ''",
+                (since_iso,),
+            ) as cur:
+                return (await cur.fetchone())[0]
 
     async def log_action(self, action_type: str, agent: str, details: dict | None = None):
         async with self._connect() as db:

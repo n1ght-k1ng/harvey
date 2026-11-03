@@ -796,6 +796,161 @@ def _pipeline_bucket(status: str | None, stage: str | None, intent: str | None,
     return "closed_out"   # lost, opted out, bounced, unwritable
 
 
+# The funnel, in order. Each contact counts once, at the furthest stage it
+# reached, and is included in every stage before it.
+FUNNEL_STAGES = (
+    ("found", "Contacts found"),
+    ("deliverable", "Deliverable email"),
+    ("drafted", "Email drafted"),
+    ("approved", "Approved to send"),
+    ("sent", "Sent"),
+    ("replied", "Replied"),
+    ("interested", "Interested"),
+    ("meeting", "Meeting"),
+)
+_STAGE_INDEX = {key: i for i, (key, _) in enumerate(FUNNEL_STAGES)}
+_APPROVED_OUTBOX = ("approved", "sending", "sent", "failed")
+
+
+def _funnel_reach(row: dict, send_to_risky: bool = False) -> tuple[str, str]:
+    """(furthest stage reached, why it stopped there) for one contact.
+
+    `row` carries the prospect's status, email_status, latest conversation
+    stage/intent, and outbox facts: drafted / approved / sent counts plus
+    pending / rejected / cancelled counts. A later fact implies the earlier
+    stages (an Instantly send has no Outbox row, but it was still sent)."""
+    status = row.get("status") or "new"
+    email_status = row.get("email_status") or ""
+    li = row.get("li_status") or ""
+    bucket = _pipeline_bucket(status, row.get("stage"), row.get("intent"), email_status)
+    if li == "interested" and bucket != "ready_to_meet":
+        bucket = "interested"
+    replied = bool(row.get("has_conversation")) or status in ("replied", "meeting")
+
+    if bucket == "ready_to_meet":
+        return "meeting", "meeting"
+    if bucket == "interested":
+        return "interested", "no meeting yet"
+    if replied:
+        return "replied", ("opted out" if status == "opted_out"
+                           else "closed lost" if row.get("stage") == "closed_lost"
+                           else "not interested yet")
+    if li in ("connect_sent", "accepted", "followup_sent"):
+        return "sent", "no reply yet (LinkedIn)"
+    if row.get("sent") or status in ("contacted", "opted_out"):
+        if email_status == "invalid":
+            return "sent", "bounced"
+        return "sent", ("opted out" if status == "opted_out" else "no reply yet")
+    if row.get("approved"):
+        if row.get("failed"):
+            return "approved", "send failed"
+        return "approved", ("cancelled" if row.get("cancelled") and not row.get("scheduled")
+                            else "scheduled")
+    if li == "draft" and not row.get("drafted"):
+        return "drafted", "LinkedIn note not sent yet"
+    if row.get("drafted"):
+        if row.get("pending"):
+            return "drafted", "waiting for your approval"
+        if row.get("rejected"):
+            return "drafted", "rejected"
+        return "drafted", "cancelled"
+    if email_status == "verified" or (email_status == "risky" and send_to_risky):
+        return "deliverable", "not written yet"
+    return "found", {
+        "invalid": "email invalid",
+        "risky": "catch-all (not sent)",
+        "guess": "email unverified",
+    }.get(email_status, "no email")
+
+
+@app.get("/api/funnel")
+async def get_funnel(days: int = 0, industry: str = ""):
+    """Contacts at each funnel stage, cumulative, with why the rest stopped.
+
+    `days` limits it to contacts found in the last N days (0 = all time);
+    `industry` to one company category."""
+    from datetime import timedelta
+    days = max(0, min(3650, days))
+    industry = industry.strip()[:200]
+    try:
+        from harvey.config import load_config
+        send_to_risky = bool(load_config().channels.email.send_to_risky)
+    except Exception:
+        send_to_risky = False
+
+    where, params = [], []
+    if days:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
+        where.append("p.created_at >= ?")
+        params.append(cutoff)
+    ind_expr = "COALESCE(NULLIF(c.industry, ''), NULLIF(p.industry, ''), 'Uncategorised')"
+    has_li = bool(await query_db("SELECT 1 FROM sqlite_master WHERE name = 'linkedin_tasks'"))
+    if industry:
+        where.append(ind_expr + " = ?")
+        params.append(industry)
+    rows = await query_db(f"""
+        SELECT p.status, p.email_status, l.stage, l.intent,
+               l.prospect_id IS NOT NULL AS has_conversation,
+               COALESCE(o.drafted, 0) AS drafted, COALESCE(o.approved, 0) AS approved,
+               COALESCE(o.sent, 0) AS sent, COALESCE(o.pending, 0) AS pending,
+               COALESCE(o.rejected, 0) AS rejected, COALESCE(o.cancelled, 0) AS cancelled,
+               COALESCE(o.failed, 0) AS failed, COALESCE(o.scheduled, 0) AS scheduled,
+               {"li.status" if has_li else "''"} AS li_status
+        FROM prospects p
+        LEFT JOIN companies c ON c.id = p.company_id
+        LEFT JOIN (SELECT prospect_id, stage, intent, ROW_NUMBER() OVER (
+                     PARTITION BY prospect_id ORDER BY updated_at DESC, created_at DESC) AS rn
+                   FROM conversations) l ON l.prospect_id = p.id AND l.rn = 1
+        LEFT JOIN (SELECT prospect_id, COUNT(*) AS drafted,
+                     SUM(status IN {_APPROVED_OUTBOX} OR COALESCE(approved_by, '') != '') AS approved,
+                     SUM(status = 'sent') AS sent,
+                     SUM(status = 'pending_review') AS pending,
+                     SUM(status = 'rejected') AS rejected,
+                     SUM(status = 'cancelled') AS cancelled,
+                     SUM(status = 'failed') AS failed,
+                     SUM(status IN ('approved', 'sending')) AS scheduled
+                   FROM outbox GROUP BY prospect_id) o ON o.prospect_id = p.id
+        {"LEFT JOIN linkedin_tasks li ON li.prospect_id = p.id" if has_li else ""}
+        {"WHERE " + " AND ".join(where) if where else ""}
+    """, tuple(params))
+
+    reached = [0] * len(FUNNEL_STAGES)
+    held: list[dict[str, int]] = [{} for _ in FUNNEL_STAGES]
+    for r in rows:
+        stage, why = _funnel_reach(r, send_to_risky)
+        i = _STAGE_INDEX[stage]
+        for j in range(i + 1):
+            reached[j] += 1
+        held[i][why] = held[i].get(why, 0) + 1
+
+    company_where = ["c.created_at >= ?"] if days else []
+    company_params = params[:1] if days else []
+    if industry:
+        company_where.append("COALESCE(NULLIF(c.industry, ''), 'Uncategorised') = ?")
+        company_params.append(industry)
+    companies = await query_db(f"""
+        SELECT COUNT(*) AS n,
+               SUM(EXISTS (SELECT 1 FROM prospects p WHERE p.company_id = c.id)) AS with_contact
+        FROM companies c {"WHERE " + " AND ".join(company_where) if company_where else ""}
+    """, tuple(company_params))
+    industries = await query_db(f"""
+        SELECT {ind_expr} AS name, COUNT(*) AS n FROM prospects p
+        LEFT JOIN companies c ON c.id = p.company_id GROUP BY name ORDER BY n DESC, name
+    """)
+    return {
+        "stages": [
+            {"key": key, "label": label, "count": reached[i],
+             "held": dict(sorted(held[i].items(), key=lambda kv: -kv[1]))}
+            for i, (key, label) in enumerate(FUNNEL_STAGES)
+        ],
+        "companies": (companies[0]["n"] or 0) if companies else 0,
+        "companies_with_contact": (companies[0]["with_contact"] or 0) if companies else 0,
+        "industries": industries,
+        "days": days,
+        "industry": industry,
+    }
+
+
 @app.get("/api/stats")
 async def get_stats():
     """Pipeline overview stats."""
@@ -1329,6 +1484,188 @@ async def _harvey_sent_to(prospect_id: str) -> bool:
 
 def _refuse(message: str, code: int = 409):
     return JSONResponse({"success": False, "message": message}, status_code=code)
+
+
+# ── LinkedIn, worked by hand: add finds, copy Harvey's drafts, record outcomes ──
+#
+# One background worker at a time: it looks up emails for newly added people,
+# then drafts notes for everyone with a profile and no draft yet.
+
+_linkedin_worker: asyncio.Task | None = None
+_linkedin_pending: set[str] = set()
+_linkedin_report: dict = {}
+LINKEDIN_DRAFT_BATCH = 10
+
+
+def _linkedin_busy() -> bool:
+    return bool(_linkedin_worker and not _linkedin_worker.done())
+
+
+async def _linkedin_work(draft: bool):
+    from harvey import linkedin_queue as lq
+    from harvey.brain import Brain
+    from harvey.config import load_brain_config, load_config, load_env
+
+    global _linkedin_report
+    state = _state()
+    await state.init_db()
+    found = 0
+    try:
+        env = load_env()
+        while _linkedin_pending:
+            pid = _linkedin_pending.pop()
+            _linkedin_report = {"step": "Finding emails", "left": len(_linkedin_pending) + 1}
+            if await lq.resolve_email(state, env, pid) in ("verified", "risky"):
+                found += 1
+        result = {"drafted": 0, "failed": 0}
+        if draft:
+            _linkedin_report = {"step": "Drafting notes"}
+            config = load_config()
+            brain = Brain(state, load_brain_config())
+            result = await lq.draft_pending(brain, state, config, limit=LINKEDIN_DRAFT_BATCH)
+        _linkedin_report = {"step": "done", "emails_found": found, **result,
+                            "finished": datetime.now(timezone.utc).isoformat()}
+    except Exception as e:
+        logger.warning(f"LinkedIn worker failed: {type(e).__name__}: {e}")
+        _linkedin_report = {"step": "failed", "error": str(e)[:300]}
+
+
+def _restart_linkedin_worker() -> bool:
+    """People added while the worker was drafting still need their emails."""
+    _start_linkedin_worker(draft=False)
+    return True
+
+
+def _start_linkedin_worker(draft: bool = True):
+    global _linkedin_worker
+    if not _linkedin_busy():
+        _linkedin_worker = asyncio.create_task(_linkedin_work(draft))
+
+
+@app.post("/api/linkedin/leads")
+async def linkedin_add_leads(request: Request):
+    """Add people found on LinkedIn: {"lead": {...}} or {"csv": "..."}."""
+    from harvey import linkedin_queue as lq
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    if not isinstance(body, dict):
+        return _refuse("Send a lead or a CSV.", 400)
+    try:
+        if isinstance(body.get("csv"), str):
+            if len(body["csv"]) > 2_000_000:
+                return _refuse("That CSV is too large (2 MB at most).", 400)
+            leads, errors = lq.parse_csv(body["csv"])
+        elif isinstance(body.get("lead"), dict):
+            leads, errors = [lq.clean_lead(body["lead"])], []
+        else:
+            return _refuse("Send a lead or a CSV.", 400)
+    except lq.LeadError as e:
+        return _refuse(str(e), 400)
+    state = _state()
+    await state.init_db()
+    added = existing = 0
+    for lead in leads:
+        pid, new = await lq.add_lead(state, lead)
+        if new:
+            added += 1
+            if lead["domain"]:
+                _linkedin_pending.add(pid)
+        else:
+            existing += 1
+    if added or existing:
+        _start_linkedin_worker(draft=True)
+    return {"success": True, "added": added, "already_known": existing, "errors": errors[:50],
+            "error_count": len(errors)}
+
+
+@app.post("/api/linkedin/draft")
+async def linkedin_draft():
+    if _linkedin_busy():
+        return {"success": True, "running": True}
+    _start_linkedin_worker(draft=True)
+    return {"success": True, "running": True}
+
+
+@app.get("/api/linkedin/queue")
+async def linkedin_queue_view():
+    from datetime import timedelta
+    from harvey import linkedin_queue as lq
+    state = _state()
+    await state.init_db()
+    rows = await query_db("SELECT 1 FROM sqlite_master WHERE name = 'linkedin_tasks'")
+    items = await state.linkedin_queue() if rows else []
+    for it in items:
+        it["stopped"] = (it["prospect_status"] in lq.STOPPED_PROSPECT
+                         and it["status"] in ("draft", "connect_sent", "accepted"))
+    waiting = await query_db(
+        "SELECT COUNT(*) AS n FROM prospects p LEFT JOIN linkedin_tasks t ON t.prospect_id = p.id "
+        "WHERE t.id IS NULL AND COALESCE(p.linkedin_url, '') != '' "
+        "AND p.status NOT IN ('opted_out', 'replied', 'meeting', 'closed', 'lost')") if rows else []
+    since = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    try:
+        from harvey.config import load_config
+        cap = load_config().channels.linkedin.max_daily_connections
+    except Exception:
+        cap = 20
+    return {
+        "items": items,
+        "waiting_for_draft": waiting[0]["n"] if waiting else 0,
+        "sent_last_24h": await state.count_linkedin_sent_since(since) if rows else 0,
+        "daily_cap": cap,
+        "running": _linkedin_busy() or bool(_linkedin_pending and _restart_linkedin_worker()),
+        "report": _linkedin_report,
+        "limits": {"connect_note": lq.CONNECT_NOTE_MAX, "followup": lq.FOLLOWUP_MAX},
+    }
+
+
+@app.post("/api/linkedin/{task_id}/edit")
+async def linkedin_edit(task_id: str, request: Request):
+    from harvey import linkedin_queue as lq
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    if not isinstance(body, dict):
+        return _refuse("Nothing to save.", 400)
+    state = _state()
+    await state.init_db()
+    task = await state.get_linkedin_task(task_id)
+    if not task:
+        return _refuse("That LinkedIn item no longer exists.", 404)
+    fields = {}
+    try:
+        if "connect_note" in body:
+            if task["status"] != "draft":
+                return _refuse("The connection note was already sent.")
+            fields["connect_note"] = lq._check_draft(str(body["connect_note"]), lq.CONNECT_NOTE_MAX,
+                                                     "connection note")
+        if "followup" in body:
+            if task["status"] not in ("draft", "connect_sent", "accepted"):
+                return _refuse("The follow-up was already sent.")
+            fields["followup"] = lq._check_draft(str(body["followup"]), lq.FOLLOWUP_MAX, "follow-up")
+    except lq.LeadError as e:
+        return _refuse(str(e), 400)
+    await state.update_linkedin_task(task_id, **fields)
+    return {"success": True}
+
+
+@app.post("/api/linkedin/{task_id}/mark")
+async def linkedin_mark(task_id: str, request: Request):
+    from harvey import linkedin_queue as lq
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    outcome = str((body or {}).get("outcome") or "") if isinstance(body, dict) else ""
+    state = _state()
+    await state.init_db()
+    try:
+        result = await lq.record_outcome(state, task_id, outcome)
+    except lq.LeadError as e:
+        return _refuse(str(e))
+    return {"success": True, **result}
 
 
 @app.post("/api/prospects/{prospect_id}/sent")

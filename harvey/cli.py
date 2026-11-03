@@ -286,11 +286,14 @@ def cmd_status(args):
                 elif brain.provider == "codex":
                     print(f"  Brain:                {label} ready (CLI, isolation, login, "
                           "model and account checked; no prompt sent)")
+                elif brain.provider == "openai":
+                    print(f"  Brain:                {label} ready (endpoint reachable, key "
+                          "accepted; no prompt sent)")
                 else:
                     print(f"  Brain:                {label} CLI isolation flags present "
                           "(login not checked: Claude is checked by its first call)")
         elif brain_status.get("status") == "paused":
-            label = {"claude": "Claude", "codex": "Codex"}.get(brain_status.get("provider"), "Brain")
+            label = {"claude": "Claude", "codex": "Codex", "openai": "Brain endpoint"}.get(brain_status.get("provider"), "Brain")
             print(f"  Brain:                {label} PAUSED since {brain_status.get('since', '?')}")
             print(f"                        {brain_status.get('reason', '')}")
         print()
@@ -332,7 +335,7 @@ def cmd_usage(args):
         except Exception:
             pass
 
-        label = {"claude": "Claude", "codex": "Codex"}.get(provider, "Brain")
+        label = {"claude": "Claude", "codex": "Codex", "openai": "Brain endpoint"}.get(provider, "Brain")
         print(f"\n  {label} Usage")
         print("  " + "=" * 52)
         if windows:

@@ -408,6 +408,8 @@ function showTab(id, btn) {
 function loadCurrentTab() {
   switch (currentTab) {
     case 'today': loadLiveStatus(); loadToday(); loadTrend(); loadFunnel(); loadSetupStatus(); loadRuns(); loadTodayActivity(); break;
+    case 'funnel': loadFunnelPage(); break;
+    case 'linkedin': loadLinkedIn(); break;
     case 'signals': loadSignals(); break;
     case 'discover': loadDiscoverProviders(); break;
     case 'companies': if (!companyDrill) loadCompanies(); break;
@@ -596,6 +598,293 @@ async function loadFunnel() {
       '<span class="legend-val">' + s[1] + '</span>' +
       '<span class="legend-pct">' + Math.round(100 * s[1] / total) + '%</span></div>'
     ).join('') + '</div>';
+}
+
+// ── LinkedIn: Harvey prepares, a person sends ──
+
+const LI_FILTERS = [
+  ['send', 'To send', ['draft']],
+  ['followup', 'Send follow-up', ['accepted']],
+  ['waiting', 'Waiting on them', ['connect_sent', 'followup_sent']],
+  ['done', 'Done', ['replied', 'interested', 'not_interested', 'skipped']],
+];
+const LI_STEP = {
+  draft: 'Not sent yet', connect_sent: 'Request sent', accepted: 'Accepted',
+  followup_sent: 'Follow-up sent', replied: 'Replied', interested: 'Interested',
+  not_interested: 'Not interested', skipped: 'Skipped',
+};
+// What can be recorded next from each step.
+const LI_NEXT = {
+  connect_sent: [['accepted', 'Accepted'], ['replied', 'Replied'], ['not_interested', 'Not interested']],
+  accepted: [['replied', 'Replied'], ['not_interested', 'Not interested']],
+  followup_sent: [['replied', 'Replied'], ['interested', 'Interested'], ['not_interested', 'Not interested']],
+  replied: [['interested', 'Interested'], ['not_interested', 'Not interested']],
+};
+let liFilter = 'send';
+let liData = null;
+let liPoll = null;
+
+async function loadLinkedIn() {
+  const data = await api('/api/linkedin/queue');
+  if (!data || !Array.isArray(data.items)) {
+    document.getElementById('li-list').innerHTML = '<p class="muted" style="font-size:13px">Couldn\'t read the LinkedIn queue.</p>';
+    return;
+  }
+  liData = data;
+  renderLinkedIn();
+  clearTimeout(liPoll);
+  if (data.running && currentTab === 'linkedin') liPoll = setTimeout(loadLinkedIn, 4000);
+}
+
+function setLiFilter(f) { liFilter = f; renderLinkedIn(); }
+
+function renderLinkedIn() {
+  const d = liData;
+  const count = st => d.items.filter(i => st.includes(i.status)).length;
+  navCount('nav-linkedin', count(['draft', 'accepted']));
+  const r = d.report || {};
+  const work = d.running
+    ? '<span>' + escHtml(r.step || 'Working') + '…</span>'
+    : (r.step === 'done' ? '<span>Last run: <b>' + (r.drafted || 0) + '</b> drafted' +
+        (r.emails_found ? ', <b>' + r.emails_found + '</b> emails found' : '') + '</span>'
+      : r.step === 'failed' ? '<span>Last run failed: ' + escHtml(r.error || '') + '</span>' : '');
+  document.getElementById('li-bar').innerHTML =
+    '<span><b>' + d.sent_last_24h + '</b> of ' + d.daily_cap + ' requests sent in the last 24 hours</span>' +
+    '<span><b>' + d.waiting_for_draft + '</b> waiting for a draft</span>' + work +
+    '<button class="btn btn-secondary btn-sm" onclick="draftLinkedIn()"' +
+      (d.running || !d.waiting_for_draft ? ' disabled' : '') + '>Draft notes</button>';
+  document.getElementById('li-filters').innerHTML = LI_FILTERS.map(([key, label, st]) =>
+    '<button class="' + (key === liFilter ? 'on' : '') + '" aria-pressed="' + (key === liFilter) +
+    '" onclick="setLiFilter(' + jsq(key) + ')">' + label + ' <span class="n">' + count(st) + '</span></button>').join('');
+
+  const shown = d.items.filter(i => LI_FILTERS.find(f => f[0] === liFilter)[2].includes(i.status));
+  const el = document.getElementById('li-list');
+  if (!shown.length) {
+    el.innerHTML = '<div class="card empty"><div class="title">Nothing here</div><p class="muted" style="font-size:13px">' +
+      (liFilter === 'send' ? (d.items.length || d.waiting_for_draft
+        ? 'Everything drafted has been sent. Add more people, or draft notes for the ones waiting.'
+        : 'Add someone you found on LinkedIn, or import a CSV. Harvey drafts a note for each.')
+        : 'No one at this step.') + '</p></div>';
+    return;
+  }
+  el.innerHTML = shown.map(liCard).join('');
+}
+
+function liCounter(id, max) {
+  const ta = document.getElementById(id);
+  const lab = document.getElementById(id + '-n');
+  if (!ta || !lab) return;
+  const n = ta.value.length;
+  lab.textContent = n + ' / ' + max;
+  lab.className = n > max ? 'over' : '';
+}
+
+function liMsg(it, field, label, editable, max) {
+  const id = 'li-' + field + '-' + it.id;
+  const text = it[field] || '';
+  if (!editable) {
+    return '<div class="li-msg"><label><span>' + label + '</span></label><div class="sent-text">' + escHtml(text) + '</div></div>';
+  }
+  return '<div class="li-msg"><label for="' + id + '"><span>' + label + '</span><span id="' + id + '-n">' +
+      text.length + ' / ' + max + '</span></label>' +
+    '<textarea class="form-input" id="' + id + '" maxlength="' + (max + 200) + '" ' +
+      'oninput="liCounter(' + jsq(id) + ',' + max + ')" ' +
+      'onchange="saveLinkedInText(' + jsq(it.id) + ',' + jsq(field) + ',' + jsq(id) + ')">' + escHtml(text) + '</textarea></div>';
+}
+
+function liCard(it) {
+  const lim = liData.limits;
+  const name = [it.first_name, it.last_name].filter(Boolean).join(' ');
+  const role = [it.title, it.company].filter(Boolean).map(escHtml).join(' · ');
+  const stopped = it.stopped
+    ? '<p class="li-stopped">' + escHtml(name) + ' is ' + escHtml(String(it.prospect_status).replace('_', ' ')) +
+      ' elsewhere. Don\'t send anything more; mark it skipped.</p>' : '';
+  let body = '', actions = [];
+  const href = safeHref(it.linkedin_url);
+  const open = href ? '<a class="btn btn-secondary btn-sm" href="' + href +
+    '" target="_blank" rel="noopener noreferrer">Open profile</a>' : '';
+  if (it.status === 'draft') {
+    body = liMsg(it, 'connect_note', 'Connection note', true, lim.connect_note) +
+           liMsg(it, 'followup', 'Follow-up, after they accept', true, lim.followup);
+    if (!it.stopped) actions.push(open,
+      '<button class="btn btn-secondary btn-sm" onclick="copyLinkedIn(' + jsq('li-connect_note-' + it.id) + ')">Copy note</button>',
+      '<button class="btn btn-primary btn-sm" onclick="markLinkedIn(' + jsq(it.id) + ',\'connect_sent\')">Mark request sent</button>');
+  } else if (it.status === 'accepted') {
+    body = liMsg(it, 'followup', 'Follow-up', true, lim.followup);
+    if (!it.stopped) actions.push(open,
+      '<button class="btn btn-secondary btn-sm" onclick="copyLinkedIn(' + jsq('li-followup-' + it.id) + ')">Copy follow-up</button>',
+      '<button class="btn btn-primary btn-sm" onclick="markLinkedIn(' + jsq(it.id) + ',\'followup_sent\')">Mark follow-up sent</button>');
+  } else {
+    body = liMsg(it, it.followup_sent_at ? 'followup' : 'connect_note',
+                 it.followup_sent_at ? 'Follow-up sent' : 'Note sent', false, 0);
+    actions.push(open);
+  }
+  (LI_NEXT[it.status] || []).forEach(([o, label]) => actions.push(
+    '<button class="btn ' + (o === 'not_interested' ? 'btn-danger' : 'btn-secondary') + ' btn-sm" onclick="markLinkedIn(' +
+    jsq(it.id) + ',' + jsq(o) + ')">' + label + '</button>'));
+  if (['draft', 'connect_sent', 'accepted'].includes(it.status)) actions.push(
+    '<button class="btn btn-ghost btn-sm" onclick="markLinkedIn(' + jsq(it.id) + ',\'skipped\')">Skip</button>');
+  return '<div class="card li-card"><div class="li-head"><div class="li-who"><div class="name">' + escHtml(name) +
+    emailTag(it) + '</div><div class="role">' + role + '</div></div>' +
+    '<span class="li-step">' + escHtml(own(LI_STEP, it.status) || it.status) + '</span></div>' +
+    body + stopped + '<div class="convo-actions">' + actions.join('') + '</div></div>';
+}
+
+async function saveLinkedInText(taskId, field, inputId) {
+  const value = document.getElementById(inputId).value;
+  const r = await api('/api/linkedin/' + encodeURIComponent(taskId) + '/edit', {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({[field]: value}),
+  });
+  if (r && r.success) {
+    const it = liData.items.find(i => i.id === taskId);
+    if (it) it[field] = value;
+    showToast('Saved', 'success');
+  } else showToast(failMsg(r, 'Couldn\'t save that.'), 'error');
+}
+
+async function copyLinkedIn(inputId) {
+  const ta = document.getElementById(inputId);
+  try { await navigator.clipboard.writeText(ta.value); showToast('Copied', 'success'); }
+  catch (e) { ta.select(); showToast('Text selected; press Ctrl+C to copy', 'success'); }
+}
+
+async function markLinkedIn(taskId, outcome) {
+  if (outcome === 'not_interested' &&
+      !confirm('Mark as not interested? This opts them out of email too.')) return;
+  const r = await api('/api/linkedin/' + encodeURIComponent(taskId) + '/mark', {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({outcome}),
+  });
+  if (r && r.success) {
+    if (r.emails_cancelled) showToast(r.emails_cancelled + ' queued email(s) cancelled', 'success');
+    loadLinkedIn();
+  } else showToast(failMsg(r, 'Couldn\'t record that.'), 'error');
+}
+
+async function draftLinkedIn() {
+  await api('/api/linkedin/draft', {method: 'POST'});
+  loadLinkedIn();
+}
+
+async function postLinkedInLeads(payload) {
+  return api('/api/linkedin/leads', {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload),
+  });
+}
+
+async function addLinkedInLead(ev) {
+  ev.preventDefault();
+  const v = id => document.getElementById(id).value.trim();
+  const r = await postLinkedInLeads({lead: {
+    linkedin_url: v('li-url'), first_name: v('li-first'), last_name: v('li-last'),
+    title: v('li-title'), company: v('li-company'), website: v('li-site'), notes: v('li-notes'),
+  }});
+  if (r && r.success) {
+    showToast(r.added ? 'Added. Harvey is researching and drafting.' : 'Already on your list; drafting if needed.', 'success');
+    document.getElementById('li-add').reset();
+    loadLinkedIn();
+  } else showToast(failMsg(r, 'Couldn\'t add that.'), 'error');
+}
+
+async function importLinkedInCsv(input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  const out = document.getElementById('li-import-result');
+  if (file.size > 2000000) { out.textContent = 'That file is over 2 MB.'; return; }
+  const r = await postLinkedInLeads({csv: await file.text()});
+  input.value = '';
+  if (!r || !r.success) { out.textContent = failMsg(r, 'Couldn\'t read that CSV.'); return; }
+  out.innerHTML = '<b>' + r.added + '</b> added, <b>' + r.already_known + '</b> already known' +
+    (r.error_count ? ', <b>' + r.error_count + '</b> skipped:<br>' +
+      r.errors.map(e => 'Row ' + e.row + ': ' + escHtml(e.error)).join('<br>') : '.');
+  loadLinkedIn();
+}
+
+// ── Funnel: how far each contact got, and why the rest stopped ──
+
+const FUNNEL_PERIODS = [[7, '7 days'], [30, '30 days'], [90, '90 days'], [0, 'All time']];
+let funnelDays = 0;
+let funnelIndustry = '';
+
+function setFunnelDays(d) { funnelDays = d; loadFunnelPage(); }
+function setFunnelIndustry(v) { funnelIndustry = v; loadFunnelPage(); }
+
+function pct(n, d) {
+  if (!d) return '–';
+  const p = 100 * n / d;
+  return (p > 0 && p < 1 ? '<1' : Math.round(p)) + '%';
+}
+
+async function loadFunnelPage() {
+  const el = document.getElementById('funnel-chart');
+  if (!el) return;
+  document.getElementById('funnel-days').innerHTML = FUNNEL_PERIODS.map(([d, label]) =>
+    '<button class="' + (d === funnelDays ? 'on' : '') + '" aria-pressed="' + (d === funnelDays) +
+    '" onclick="setFunnelDays(' + d + ')">' + label + '</button>').join('');
+
+  const data = await api('/api/funnel?days=' + funnelDays + '&industry=' + encodeURIComponent(funnelIndustry));
+  if (!data || !Array.isArray(data.stages)) {
+    el.innerHTML = '<p class="muted" style="font-size:13px">Couldn\'t read the funnel.</p>';
+    return;
+  }
+
+  const sel = document.getElementById('funnel-industry');
+  const all = (data.industries || []).reduce((n, i) => n + (i.n || 0), 0);
+  sel.innerHTML = '<option value="">All categories (' + all + ')</option>' +
+    (data.industries || []).map(i => '<option value="' + escHtml(i.name) + '"' +
+      (i.name === funnelIndustry ? ' selected' : '') + '>' + escHtml(i.name) + ' (' + i.n + ')</option>').join('');
+
+  renderFunnel(el, data);
+}
+
+function renderFunnel(el, data) {
+  const st = data.stages;
+  const top = st[0].count;
+  const count = key => (st.find(s => s.key === key) || {}).count || 0;
+  const sent = count('sent'), replied = count('replied');
+  const facts = '<div class="funnel-facts">' +
+    '<span><b>' + (data.companies || 0) + '</b> companies found</span>' +
+    '<span><b>' + (data.companies_with_contact || 0) + '</b> with a contact</span>' +
+    '<span><b>' + sent + '</b> sent (' + pct(sent, top) + ' of contacts)</span>' +
+    '<span><b>' + pct(replied, sent) + '</b> reply rate</span></div>';
+  if (!top) {
+    el.innerHTML = facts + '<p class="muted" style="font-size:13px;margin-top:12px">' +
+      'No contacts here yet. Try a longer period or another category.</p>';
+    return;
+  }
+
+  // The biggest loss between two steps is the one worth fixing first.
+  let worst = -1, worstLost = 0;
+  for (let i = 1; i < st.length; i++) {
+    const lost = st[i - 1].count - st[i].count;
+    if (lost > worstLost) { worst = i; worstLost = lost; }
+  }
+
+  const heldText = h => Object.entries(h || {}).map(([why, n]) =>
+    '<b>' + n + '</b> ' + escHtml(why)).join(' · ');
+
+  const rows = st.map((s, i) => {
+    const prev = i ? st[i - 1] : null;
+    const w = top ? (100 * s.count / top) : 0;
+    const tip = escHtml(s.label) + ': ' + s.count + ' (' + pct(s.count, top) + ' of found' +
+      (prev ? ', ' + pct(s.count, prev.count) + ' of ' + prev.label.toLowerCase() : '') + ')';
+    const stopped = heldText(s.held);
+    return '<div class="funnel-row" tabindex="0" title="' + tip + '">' +
+        '<span class="funnel-label">' + escHtml(s.label) + '</span>' +
+        '<span class="funnel-track"><span class="funnel-fill" style="width:' + w.toFixed(2) + '%"></span></span>' +
+        '<span class="funnel-count' + (s.count ? '' : ' zero') + '">' + s.count + '</span>' +
+        '<span class="funnel-conv">' + (prev ? pct(s.count, prev.count) : '') + '</span>' +
+      '</div>' +
+      (stopped ? '<div class="funnel-held">' +
+        (i + 1 === worst ? '<span class="funnel-flag">Biggest drop</span>' : '') +
+        'Stopped here: ' + stopped + '</div>' : '');
+  }).join('');
+
+  el.innerHTML = facts +
+    '<div class="funnel-head" aria-hidden="true"><span>Stage</span><span></span><span>Contacts</span><span title="Share of the previous stage that got this far">Kept</span></div>' +
+    '<div class="funnel">' + rows + '</div>' +
+    '<p class="figure-note">Each contact counts once, at the furthest stage it reached, and in every stage before it. ' +
+    'Kept is the share of the stage above that got this far. ' +
+    (data.days ? 'Contacts found in the last ' + data.days + ' days.' : 'All contacts.') + '</p>';
 }
 
 async function loadTodayActivity() {
